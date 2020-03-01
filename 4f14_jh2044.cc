@@ -210,6 +210,6 @@ private:
     // true: list front=queue front
     // false: list front=queue back
     bool direction;
-    size_type size;
+    size_t size;
 
 };
