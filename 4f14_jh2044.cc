@@ -3,6 +3,7 @@
 #include <mutex>
 #include <list>
 #include <chrono>
+#include <map>
 
 
 template<class T>
@@ -255,6 +256,7 @@ public:
             if (!behindNode) {
                 // is the queue length 1 (ie high-level is already locked)
                 // we are at the back so lock high-level mutex
+                // TODO: this is bad news bears as we might lock a high-level lock AFTER a low level lock
                 if(infrontNode) std::lock_guard<std::mutex> listLock(m);
             } else {
                 // we are not at the back so lock backward node
@@ -305,6 +307,8 @@ public:
 private:
     std::shared_ptr<Node<T>> front;
     std::shared_ptr<Node<T>> back;
+
+    std::map<std::thread::id, std::shared_ptr<Node<T>>> threadLocator;
 };
 
 template<class T>
