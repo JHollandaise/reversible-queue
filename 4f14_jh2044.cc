@@ -37,62 +37,66 @@ public:
 
     // return a pointer to the front node
     std::shared_ptr<Node<T>> GetFront() const {
-        //TODO: lock properly these functions
+        // lock high-level mutex
+        std::lock_guard<std::mutex> listLock(m);
         return front;
     }
+
     // return a pointer to the rear node
-    std::shared_ptr<Node<T>> GetBack() const {return back;}
+    std::shared_ptr<Node<T>> GetBack() const {
+        // lock high-level mutex
+        std::lock_guard<std::mutex> listLock(m);
+        return back;
+    }
 
     // adds a data item in front of the first item
     void PushFront(T item) {
         // TODO: is item valid?
-        std::shared_ptr<Node<T>>newNode = std::make_shared<Node<T>>(item);
+        const std::shared_ptr<Node<T>>newNode = std::make_shared<Node<T>>(item);
 
-        // acquire high level list mutex
-        // (write to *f and *b => invalid)
+        // acquire high-level list mutex
         std::lock_guard<std::mutex> listLock(m);
-        // acquire low level node mutex as is not yet in list so may have
+        // acquire newNode as is not yet in list so may have
         // invalid pointers
         std::lock_guard<std::mutex>newNodeLock(newNode->m);
 
 
-        // is list empty?
+        // is list empty? note don't need to check !back as is always true if !front
         if(!front) {
-            // node is at front and back of list
-            front = newNode;
+            // newNode is at the back of the list (as well as front)
             back = newNode;
         }
-        // otherwise link this bad boy to its new rear neighbour
+        // otherwise link newNode to its new rear neighbour
         else {
             // acquire low level mutex for old front elem as is written
             std::lock_guard<std::mutex> oldFrontLock(front->m);
-            // safely link old front to newNode
+            // link old front to newNode
             front->SetInfront(newNode);
             // and newNode to old front
             newNode->SetBehind(front);
-            // finally newNode is at the front of the list
-            front = newNode;
         }
+        // finally newNode is at the front of the list
+        front = newNode;
     }
 
     // adds a data item behind the last item
-    // TODO: const or not?
     void PushBack(T const item) {
         // TODO: is item valid?
+
+        // generate a newNode
         const std::shared_ptr<Node<T>>newNode = std::make_shared<Node<T>>(item);
 
         // acquire high level list mutex
-        // (write to *f and *b => invalid)
+        // (write to front/back)
         std::lock_guard<std::mutex> listLock(m);
         // acquire low level node mutex as is not yet in list so may have
         // invalid pointers
-        std::lock_guard<std::mutex> newLock(newNode->m);
+        std::lock_guard<std::mutex> newNodeLock(newNode->m);
 
-        // is list empty?
+        // is list empty? note don't need to check !front as is always true if !back
         if(!back) {
-            // node is at front and back of list
+            // newNode is at front of list (as well as back)
             front = newNode;
-            back = newNode;
         }
         // otherwise link this bad boy to its new in-front neighbour
         else {
@@ -102,9 +106,9 @@ public:
             back->SetBehind(newNode);
             // and newNode to old back
             newNode->SetInfront(back);
-            // finally newNode is at the back of the list
-            back = newNode;
         }
+        // finally newNode is at the back of the list
+        back = newNode;
     }
 
     // removes the first data item
@@ -113,7 +117,7 @@ public:
         // (write to *f / b* => invalid)
         std::lock_guard<std::mutex> listLock(m);
 
-        // empty queue
+        // empty list
         if(!front) throw std::logic_error("cannot pop from empty list");
         // single item in list? => safe to burn the references
         else if (front == back) {
@@ -121,19 +125,18 @@ public:
             front = nullptr;
             back = nullptr;
         }
-            // otherwise need to then acquire the relevant low-level
+        // otherwise need to then acquire the relevant low-level
         else {
             // acquire death-row node FIRST
-            std::lock_guard<Node<T>> popLock(front->m);
+            std::lock_guard<std::mutex> eraseLock(front->m);
             // THEN get neighbour BEHIND this one
-            std::shared_ptr<Node<T>> behindNeigh(front->GetBehind());
-            std::lock_guard<std::mutex> behindLock(behindNeigh->m);
+            std::shared_ptr<Node<T>> behindNode(front->GetBehind());
+            std::lock_guard<std::mutex> behindLock(behindNode->m);
 
-            // fix connections FRONT TO BACK
-            front = behindNeigh;
-            behindNeigh->SetInfront(front);
-
-            // TODO: I assume that nothing is pointing to death-row node now so it should die according to make_shared
+            // modify data
+            front->SetBehind(nullptr);
+            behindNode->SetInfront(nullptr);
+            front = behindNode;
         }
     }
 
@@ -143,17 +146,40 @@ public:
         // (write to *f / b* => invalid)
         std::lock_guard<std::mutex> listLock(m);
 
-        // empty queue
+        // empty list
         if(!back) throw std::logic_error("cannot pop from empty list");
         // single item in list? => safe to burn the references
         else if (front == back) {
-            // TODO: check don't need to acquire the low-level mutex here as is alone
             front = nullptr;
             back = nullptr;
         }
-        // otherwise need to then acquire the relevant low-level
+        // otherwise need to then acquire the relevant low-level mutex
         else {
-            // TODO: I assume that nothing is pointing to death-row node now so it should die according to make_shared
+            // This function requires a locking attempt loop due to it requiring a lock and its forward neighbour
+            // we are making the locking attempt on forward neighbours weak in order to remove deadlock states
+            while(true) {
+                // first lock the node due to be removed
+                std::lock_guard<std::mutex> eraseLock(back->m);
+
+                // attempt to lock the forwardNeighbour
+                std::shared_ptr<Node<T>> infrontNode(back->GetInfront());
+                std::unique_lock<std::mutex> infrontLock(infrontNode->m, std::defer_lock);
+                if (!infrontLock.try_lock()) {
+                    // if we fail to lock the forward lock, unlock everything and try again
+                    // TODO: almost certainly some livelocking going on here, not too serious
+                    continue;
+                }
+
+                // we have all the necessary locks, so modify data
+                back->SetInfront(nullptr);
+                infrontNode->SetBehind(nullptr);
+                back = infrontNode;
+
+                // we done, so leave loop
+                break;
+
+            }
+
         }
     }
 
@@ -218,7 +244,7 @@ public:
                 // we are not at the front so ATTEMPT to lock infront node
                 std::unique_lock<std::mutex> infrontLock(infrontNode->m, std::defer_lock);
                 if (!infrontLock.try_lock()) {
-                    // if we fail to lock the backward lock, unlock everything and try again
+                    // if we fail to lock the forward lock, unlock everything and try again
                     // TODO: almost certainly some livelocking going on here, not too serious
                     continue;
                 }
@@ -255,7 +281,7 @@ public:
             }
             // otherwise rearrange backward neighbour
             else {
-                // NOTE: this is stll valid even if we are at the front of the queue
+                // NOTE: this is still valid even if we are at the front of the queue
                 behindNode->SetInfront(nodeToKill->GetInfront());
             }
 
@@ -269,8 +295,11 @@ public:
 
     }
 
+
+
     // traverses the list and returns the length
-    // TODO: this is VERY expensive and holds the high level lock for ages
+    // NOTE: by the time this function returns additional nodes could have been added/removed by other threads
+    // NOTE: so only serves to be an APPROXIMATION FOR LENGTH
     unsigned long GetLength();
 
 private:
@@ -283,7 +312,7 @@ class ReversibleQueue {
 public:
     ReversibleQueue() : direction(true) {};
 
-    // returns the length of the data deque
+    // returns the length of the data deque. THIS IS JUST AN APPROXIMATION OF THE CURRENT LENGTH
     auto getSize() const;
 
     // adds a data item to the back of the queue
