@@ -163,7 +163,7 @@ public:
         auto next = threadPos[t]->getNext();
         if (next) {
             next->m.lock();
-            threadPos[t]->m.unlock();g++ -std=c++17 -O2 -Wall -pedantic -
+            threadPos[t]->m.unlock();
             threadPos[t] = next;
             return threadPos[t]->getData();
         } else {

@@ -2,6 +2,7 @@
 #include <exception>
 #include <mutex>
 #include <list>
+#include <chrono>
 
 
 template<class T>
@@ -11,11 +12,11 @@ public:
 
     std::mutex m;
 
-    void setInfront(std::shared_ptr<Node> f) {infront = f;}
-    void setBehind(std::shared_ptr<Node> b) {behind = b;}
+    void SetInfront(std::shared_ptr<Node> f) {infront = f;}
+    void SetBehind(std::shared_ptr<Node> b) {behind = b;}
 
-    std::shared_ptr<Node> getInfront() const {return infront;}
-    std::shared_ptr<Node> getBehind() const {return behind;}
+    std::shared_ptr<Node> GetInfront() const {return infront;}
+    std::shared_ptr<Node> GetBehind() const {return behind;}
 
     T const getData() const {return data;}
 
@@ -35,12 +36,15 @@ public:
     mutable std::mutex m;
 
     // return a pointer to the front node
-    std::shared_ptr<Node<T>> getFront() const {return front;}
+    std::shared_ptr<Node<T>> GetFront() const {
+        //TODO: lock properly these functions
+        return front;
+    }
     // return a pointer to the rear node
-    std::shared_ptr<Node<T>> getBack() const {return back;}
+    std::shared_ptr<Node<T>> GetBack() const {return back;}
 
     // adds a data item in front of the first item
-    void push_front(T item) {
+    void PushFront(T item) {
         // TODO: is item valid?
         std::shared_ptr<Node<T>>newNode = std::make_shared<Node<T>>(item);
 
@@ -63,9 +67,9 @@ public:
             // acquire low level mutex for old front elem as is written
             std::lock_guard<std::mutex> oldFrontLock(front->m);
             // safely link old front to newNode
-            front->setInfront(newNode);
+            front->SetInfront(newNode);
             // and newNode to old front
-            newNode->setBehind(front);
+            newNode->SetBehind(front);
             // finally newNode is at the front of the list
             front = newNode;
         }
@@ -73,7 +77,7 @@ public:
 
     // adds a data item behind the last item
     // TODO: const or not?
-    void push_back(T const item) {
+    void PushBack(T const item) {
         // TODO: is item valid?
         const std::shared_ptr<Node<T>>newNode = std::make_shared<Node<T>>(item);
 
@@ -95,16 +99,16 @@ public:
             // acquire low level mutex for old back elem as is written
             std::lock_guard<std::mutex> oldBackLock(back->m);
             // safely link old back to newNode
-            back->setBehind(newNode);
+            back->SetBehind(newNode);
             // and newNode to old back
-            newNode->setInfront(back);
+            newNode->SetInfront(back);
             // finally newNode is at the back of the list
             back = newNode;
         }
     }
 
     // removes the first data item
-    void pop_front() {
+    void PopFront() {
         // acquire high level list mutex
         // (write to *f / b* => invalid)
         std::lock_guard<std::mutex> listLock(m);
@@ -122,19 +126,19 @@ public:
             // acquire death-row node FIRST
             std::lock_guard<Node<T>> popLock(front->m);
             // THEN get neighbour BEHIND this one
-            std::shared_ptr<Node<T>> behindNeigh(front->getBehind());
+            std::shared_ptr<Node<T>> behindNeigh(front->GetBehind());
             std::lock_guard<std::mutex> behindLock(behindNeigh->m);
 
             // fix connections FRONT TO BACK
             front = behindNeigh;
-            behindNeigh->setInfront(front);
+            behindNeigh->SetInfront(front);
 
             // TODO: I assume that nothing is pointing to death-row node now so it should die according to make_shared
         }
     }
 
     // removes the last data item
-    void pop_back() {
+    void PopBack() {
         // acquire high level list mutex
         // (write to *f / b* => invalid)
         std::lock_guard<std::mutex> listLock(m);
@@ -149,30 +153,84 @@ public:
         }
         // otherwise need to then acquire the relevant low-level
         else {
-            // acquire death-row node AND INFRONT FIRST
-            std::unique_lock<Node<T>> popLock(front->m, std::defer_lock);
-            std::unique_lock<Node<T>> infrontLock(front)
-            // THEN get neighbour BEHIND this one
-            std::shared_ptr<Node<T>> behindNeigh(front->getBehind());
-            std::lock_guard<std::mutex> behindLock(behindNeigh->m);
-
-            // fix connections FRONT TO BACK
-            front = behindNeigh;
-            behindNeigh->setInfront(front);
-
             // TODO: I assume that nothing is pointing to death-row node now so it should die according to make_shared
         }
     }
 
     // adds a data node before given location in the chain
-    void insert(T data, std::shared_ptr<Node<T>> locator);
+    void insert(const T item, const std::shared_ptr<Node<T>> locator);
 
     // erases a data node at a given location in the chain
-    void erase(std::shared_ptr<Node<T>> locator);
+    void erase(const std::shared_ptr<Node<T>> nodeToKill) {
+
+
+        while(true) {
+            // first lock the node to be removed
+            std::lock_guard<std::mutex> eraseLock(nodeToKill->m);
+
+            // check that there is a forward node
+            std::shared_ptr<Node<T>> infrontNode(nodeToKill->GetInfront());
+            if (!infrontNode) {
+                // we are at the front so lock high-level mutex
+                std::lock_guard<std::mutex> listLock(m);
+            } else {
+                // we are not at the front so ATTEMPT to lock infront node
+                std::unique_lock<std::mutex> forwardLock(infrontNode->m, std::defer_lock);
+                if (!forwardLock.try_lock()) {
+                    // if we fail to lock the backward lock, unlock everything and try again
+                    // TODO: almost certainly some livelocking going on here, not too serious
+                    continue;
+                }
+            }
+
+            // check that there is a backward node
+            std::shared_ptr<Node<T>> backwardNode(nodeToKill->GetBehind());
+            if (!backwardNode) {
+                // is the queue length 1 (ie high-level is already locked)
+                // we are at the back so lock high-level mutex
+                if(infrontNode) std::lock_guard<std::mutex> listLock(m);
+            } else {
+                // we are not at the back so lock backward node
+                std::lock_guard<std::mutex> backwardLock(backwardNode->m);
+            }
+
+            // we now have all the necessary locks in out possession, so modify data accordingly
+
+            // if we're at front, kill high-level reference
+            if(!infrontNode) {
+                // !infrontNode == true also in case that we've already killed this node so validate
+                if(front == nodeToKill) front = nodeToKill->GetBehind();
+            }
+            // otherwise rearrange forward neighbour
+            else {
+                // NOTE: this is stll valid even if we are at the back of the queue
+                infrontNode->SetBehind(nodeToKill->GetBehind());
+            }
+
+            // if we're at back, kill high-level reference
+            if(!backwardNode) {
+                // !backwardNode == true also in case that we've already killed this node so validate
+                if(back == nodeToKill) back = nodeToKill->GetInfront();
+            }
+            // otherwise rearrange backward neighbour
+            else {
+                // NOTE: this is stll valid even if we are at the front of the queue
+                backwardNode->SetInfront(nodeToKill->GetInfront());
+            }
+
+            // now ensure both refs inside nodeToKill are dead
+            nodeToKill->SetBehind() = nullptr;
+            nodeToKill->SetInfront() = nullptr;
+
+            // escape the loop as we're done
+            break;
+        }
+
+    }
 
     // traverses the list and returns the length
     // TODO: this is VERY expensive and holds the high level lock for ages
-    unsigned long get_length();
+    unsigned long GetLength();
 
 private:
     std::shared_ptr<Node<T>> front;
