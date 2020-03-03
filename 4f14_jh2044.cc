@@ -32,7 +32,7 @@ class List {
 public:
     List() : front(nullptr), back(nullptr) {}
 
-    // TODO: could mutex individual data (front, back, size), significant benefit?
+    // TODO: could mutex individual data (front, back); significant benefit? probably not worth it
     mutable std::mutex m;
 
     // return a pointer to the front node
@@ -86,7 +86,7 @@ public:
         std::lock_guard<std::mutex> listLock(m);
         // acquire low level node mutex as is not yet in list so may have
         // invalid pointers
-        std::lock_guard<std::mutex> newNodeLock(newNode->m);
+        std::lock_guard<std::mutex> newLock(newNode->m);
 
         // is list empty?
         if(!back) {
@@ -157,13 +157,54 @@ public:
         }
     }
 
-    // adds a data node before given location in the chain
-    void insert(const T item, const std::shared_ptr<Node<T>> locator);
+    // adds a data node behind the given location in the chain
+    void insert(const T item, const std::shared_ptr<Node<T>> locatorNode) {
+        // TODO: is the locatorNode pointer valid?
+
+        // generate a newNode and acquire it
+        const std::shared_ptr<Node<T>>newNode = std::make_shared<Node<T>>(item);
+        std::lock_guard<std::mutex> newLock(newNode->m);
+
+        // acquire the locator Node
+        std::lock_guard<std::mutex> locatorLock(locatorNode);
+        // check if there is a node behind it
+        std::shared_ptr<Node<T>> behindNode(locatorNode->GetBehind());
+        if (!behindNode) {
+            // we are at the back so lock high-level mutex
+            std::lock_guard<std::mutex> listLock(m);
+        } else {
+            // we are not at the back so lock the behind neighbour
+            std::lock_guard<std::mutex> behindLock(behindNode->m);
+        }
+
+        // we now hold all relevant locks so modify data
+
+
+        // behind <--> newNode
+        // are we at the back
+        if(!behindNode) {
+            // check node is valid then redirect
+            if(back == locatorNode) back = newNode;
+            // TODO: this is bad times as we are trying to insert at a dead node. Can fix but bit of a pain
+            else throw std::logic_error("cannot insert a node before a erased node");
+        }
+        // otherwise we are in the pack
+        else {
+            behindNode->SetInfront(newNode);
+            newNode->SetBehind(behindNode);
+        }
+
+        // newNode <--> infront
+        locatorNode->SetBehind(newNode);
+        newNode->SetInfront(locatorNode);
+
+    }
 
     // erases a data node at a given location in the chain
     void erase(const std::shared_ptr<Node<T>> nodeToKill) {
 
-
+        // This function requires a locking attempt loop due to it requiring a lock and its forward neighbour
+        // we are making the locking attempt on forward neighbours weak in order to remove deadlock states
         while(true) {
             // first lock the node to be removed
             std::lock_guard<std::mutex> eraseLock(nodeToKill->m);
@@ -175,23 +216,23 @@ public:
                 std::lock_guard<std::mutex> listLock(m);
             } else {
                 // we are not at the front so ATTEMPT to lock infront node
-                std::unique_lock<std::mutex> forwardLock(infrontNode->m, std::defer_lock);
-                if (!forwardLock.try_lock()) {
+                std::unique_lock<std::mutex> infrontLock(infrontNode->m, std::defer_lock);
+                if (!infrontLock.try_lock()) {
                     // if we fail to lock the backward lock, unlock everything and try again
                     // TODO: almost certainly some livelocking going on here, not too serious
                     continue;
                 }
             }
 
-            // check that there is a backward node
-            std::shared_ptr<Node<T>> backwardNode(nodeToKill->GetBehind());
-            if (!backwardNode) {
+            // check that there is a behind node
+            std::shared_ptr<Node<T>> behindNode(nodeToKill->GetBehind());
+            if (!behindNode) {
                 // is the queue length 1 (ie high-level is already locked)
                 // we are at the back so lock high-level mutex
                 if(infrontNode) std::lock_guard<std::mutex> listLock(m);
             } else {
                 // we are not at the back so lock backward node
-                std::lock_guard<std::mutex> backwardLock(backwardNode->m);
+                std::lock_guard<std::mutex> behindLock(behindNode->m);
             }
 
             // we now have all the necessary locks in out possession, so modify data accordingly
@@ -208,14 +249,14 @@ public:
             }
 
             // if we're at back, kill high-level reference
-            if(!backwardNode) {
+            if(!behindNode) {
                 // !backwardNode == true also in case that we've already killed this node so validate
                 if(back == nodeToKill) back = nodeToKill->GetInfront();
             }
             // otherwise rearrange backward neighbour
             else {
                 // NOTE: this is stll valid even if we are at the front of the queue
-                backwardNode->SetInfront(nodeToKill->GetInfront());
+                behindNode->SetInfront(nodeToKill->GetInfront());
             }
 
             // now ensure both refs inside nodeToKill are dead
