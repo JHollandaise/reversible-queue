@@ -6,6 +6,8 @@
 #include <map>
 #include <string>
 #include <tuple>
+#include <iostream>
+#include <random>
 
 
 template<class T>
@@ -31,7 +33,7 @@ public:
 
     void SetDirection(bool newDirection) { direction = newDirection; }
 
-    T const getData() const {return data;}
+    const T data;
 
 private:
     // pointers to neighbour to front and back
@@ -41,8 +43,6 @@ private:
     // swappable traverse and locking order
     // true: right = infront; false: left = infront
     bool direction;
-
-    T const data;
 };
 
 template<class T>
@@ -54,7 +54,7 @@ public:
     mutable std::mutex m;
 
     // adds a data item to the front of the queue
-    void PushFront(T item) {
+    void PushFront(const T item) {
         // acquire high-level list mutex
         std::lock_guard<std::mutex> listLock(m);
 
@@ -89,7 +89,7 @@ public:
     }
 
     // adds a data item behind the last item
-    void PushBack(T const item) {
+    void PushBack(const T item) {
         // TODO: is item valid?
 
         // generate a newNode
@@ -149,7 +149,6 @@ public:
             behindNode->SetInfront(behindNode);
             front = behindNode;
         }
-
     }
 
     // removes the last data item
@@ -163,9 +162,8 @@ public:
 
         // This function requires a locking attempt loop due to it requiring a lock and its forward neighbour
         // we are making the locking attempt on forward neighbours weak in order to remove deadlock states
+        std::unique_lock<std::mutex>eraseLock(back->m);
         while(true) {
-            // acquire death-row node FIRST
-            std::lock_guard<std::mutex> eraseLock(back->m);
             // single item in list? => safe to burn the references
             if (front == back) {
                 back->SetBehind(nullptr);
@@ -181,6 +179,9 @@ public:
                 if (!infrontLock.try_lock()) {
                     // if we fail to lock the forward lock, unlock everything and try again
                     // TODO: almost certainly some livelocking going on here, not too serious
+                    eraseLock.unlock();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                    eraseLock.lock();
                     continue;
                 }
 
@@ -198,7 +199,7 @@ public:
 
     // adds a data node behind the given current thread observer location
     // will throw an error if the observer is looking at the rear node
-    void insert(const T item) {
+    void Insert(const T item) {
 
         // NOTE: this operation never requires the ownership of the high-level mutex so multiple can occur simultaneously
 
@@ -219,7 +220,6 @@ public:
             // lock the behind neighbour
             std::lock_guard<std::mutex> behindLock(behindNode->m);
         }
-
         // we now hold all relevant locks so modify data
         // back <--> newNode
         // are we at the back
@@ -233,7 +233,7 @@ public:
     }
 
     // erases a data node at the thread locator position and then remove the thread locator
-    void erase() {
+    void Erase() {
 
         std::shared_ptr<Node<T>> nodeToKill(threadLocator[std::this_thread::get_id()]);
         if (!nodeToKill) throw std::logic_error("thread not currently observing queue");
@@ -244,10 +244,10 @@ public:
             // check that there is a forward node
             std::shared_ptr<Node<T>> infrontNode(nodeToKill->GetInfront());
             if (infrontNode == nodeToKill) {
-                // we are at the front of the queue so just use PopFront (this is a high-level operation
+                // we are at the front of the queue so just use PopFront (this is a high-level operation)
+                threadLocator[std::this_thread::get_id()] = nullptr;
                 nodeToKill->m.unlock();
                 PopFront();
-                threadLocator[std::this_thread::get_id()] = nullptr;
                 return;
             }
             // this should not happen
@@ -259,7 +259,7 @@ public:
                     // if we fail to lock the forward lock, unlock everything and try again
                     nodeToKill->m.unlock();
                     // give the blocking thread a chance to complete acquire of this/release that node
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
                     nodeToKill->m.lock();
                     continue;
                 }
@@ -269,8 +269,7 @@ public:
             std::shared_ptr<Node<T>> behindNode(nodeToKill->GetBehind());
             // we can catch this condition when we call erase and issue a PopBack
             if (behindNode == nodeToKill) throw std::domain_error("cannot erase node at the back of the queue (use PopBack)");
-            // this definitely should never happen as it should have been caught in the above version, put here for
-            // completeness
+            // this definitely should never happen as it should have been caught above, put here for completeness
             if (!behindNode) throw std::logic_error("locatorNode is already erased");
 
             std::lock_guard<std::mutex> behindLock(behindNode->m);
@@ -278,8 +277,8 @@ public:
             infrontNode->SetBehind(nodeToKill->GetBehind());
             behindNode->SetInfront(nodeToKill->GetInfront());
             // now kill both refs inside nodeToKill to mark its death
-            nodeToKill->SetBehind() = nullptr;
-            nodeToKill->SetInfront() = nullptr;
+            nodeToKill->SetBehind(nullptr);
+            nodeToKill->SetInfront(nullptr);
             // kill thread locator
             threadLocator[std::this_thread::get_id()] = nullptr;
             break;
@@ -287,14 +286,118 @@ public:
 
     }
 
+    // set the thread to observe the rear of the queue
+    void GoToBack() const {
+        std::shared_ptr<Node<T>> currentNode (threadLocator[std::this_thread::get_id()]);
+        if(currentNode) {
+            currentNode->m.unlock();
+        }
+
+        // acquire high level access
+        std::lock_guard<std::mutex> queueLock(m);
+        threadLocator[std::this_thread::get_id()] = back;
+        if(!back) throw std::domain_error("queue empty");
+        back->m.lock();
+    }
+
+    // moves the observed node to the one in front of current, throws an exception if at the front already
+    void MoveForward() const {
+        std::shared_ptr<Node<T>> currentNode (threadLocator[std::this_thread::get_id()]);
+
+        if(!currentNode) throw std::logic_error("thread not currently observing the queue");
+
+        // perform a weak lock attempt to acquire node infront
+        while(true) {
+            std::shared_ptr<Node<T>> infrontNode (currentNode->GetInfront());
+            if(!infrontNode) throw std::logic_error("observed node is erased");
+
+            if(infrontNode == currentNode) {
+                // we are at the end so release observer
+                currentNode->m.unlock();
+                threadLocator[std::this_thread::get_id()] = nullptr;
+                throw std::domain_error("current observed node at front of queue");
+            }
+
+            if(!infrontNode->m.try_lock()) {
+                // unlock everything and try again
+                currentNode->m.unlock();
+                // give the blocking thread a chance to complete acquire of this/release that node
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                currentNode->m.lock();
+                continue;
+            }
+
+            // release lock on this node
+            currentNode->m.unlock();
+            // now set observer to the infront node
+            threadLocator[std::this_thread::get_id()] = infrontNode;
+            break;
+        }
+    }
+
+    // unlocks and stops observing a node
+    void ClearObserver() const {
+        std::shared_ptr<Node<T>> currentNode (threadLocator[std::this_thread::get_id()]);
+        if(currentNode) {
+            currentNode->m.unlock();
+            threadLocator[std::this_thread::get_id()] = nullptr;
+        }
+    }
+
     // changes the access and traverse direction of the queue
-    void reverse();
+    void reverse() {
+        // acquire high-level control
+        std::lock_guard<std::mutex> queueLock(m);
 
+        // queue has at least one item
+        if(back) {
+            // iterate through queue items from back and change direction
+            std::shared_ptr<Node<T>> currentNode(back);
+            currentNode->m.lock();
+            std::shared_ptr<Node<T>> infrontNode;
+            while(true) {
+                // perform a weak lock attempt to acquire node infront
+                while(true) {
+                    infrontNode = currentNode->GetInfront();
+                    if(!infrontNode) throw std::logic_error("observed node is erased");
 
-    // traverses the list and returns the length
-    // NOTE: by the time this function returns additional nodes could have been added/removed by other threads
-    // NOTE: so only serves to be an APPROXIMATION FOR LENGTH
-    unsigned long GetLength() const;
+                    // we're at the front so no need to lock
+                    if(infrontNode == currentNode) {
+                        break;
+                    }
+                    if(!infrontNode->m.try_lock()) {
+                        // unlock everything and try again
+                        currentNode->m.unlock();
+                        // give the blocking thread a chance to complete acquire of this/release that node
+                        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                        currentNode->m.lock();
+                        continue;
+                    }
+                    break;
+                }
+                currentNode->SetDirection(!direction);
+                if(infrontNode==currentNode) {
+                    currentNode->m.unlock();
+                    break;
+                }
+                currentNode->m.unlock();
+                // TODO: this is an unsafe operation!!!
+                currentNode = infrontNode;
+            }
+        }
+        direction = !direction;
+        std::shared_ptr<Node<T>> temp (back);
+        back = front;
+        front = temp;
+
+    }
+
+    // returns the data contained in the currently observed node
+    T GetData() const {
+        std::shared_ptr<Node<T>> node (threadLocator[std::this_thread::get_id()]);
+        if (!node) throw std::logic_error("thread not currently observing the queue");
+        return node->data;
+    }
 
 private:
 
@@ -302,27 +405,159 @@ private:
     std::shared_ptr<Node<T>> front;
     std::shared_ptr<Node<T>> back;
 
-    // stores the location in the list each thread is currently holding
-    // this ensures that a thread will maintain ownership of a node while "inside" the list
-    // this allows arbitrary list traversal of any number of threads.
-    // TODO: potential issues can arise from thread acess locations from crossing over eachother
-    std::map<std::thread::id, std::shared_ptr<Node<T>>> threadLocator;
+    // stores the location in the queue each thread is currently holding
+    // this ensures that a thread will maintain ownership of a node while "inside" the queue
+    // this allows forward queue traversal of any number of threads.
+    mutable std::map<std::thread::id, std::shared_ptr<Node<T>>> threadLocator;
 
     // enforces the entry side and direction of list traversing
     // true: front = front; false: back = front
     bool direction;
 };
 
+void QueueReverser(ReversibleQueue<std::tuple<int, int, std::string>> &queue) {
+    // reverses the direction of the queue, then prints out the sum of the numerical entries
+    // returns when the queue is empty
+
+    while (true) {
+        // reverse queue direction
+        queue.reverse();
+
+        try {
+            queue.GoToBack();
+        }
+        catch (const std::domain_error&) {
+            // the queue is empty
+            break;
+        }
+        // sum the number in entries and print
+        long sum(0);
+        while(true) {
+            std::tuple<int, int, std::string> data(queue.GetData());
+
+            sum += std::get<1>(data);
+
+            try {
+                queue.MoveForward();
+            }
+                // we have reached the end
+            catch (const std::domain_error&) {
+                break;
+            }
+
+        }
+        std::cout << "\n" << sum << "\n";
+
+//        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+}
+
+void QueuePrinter(ReversibleQueue<std::tuple<int, int, std::string>> &queue) {
+    // continually prints the sequence of nodes currently in the queue, from back to front
+    // returns when the queue is empty
+
+    while (true) {
+        try {
+            queue.GoToBack();
+        }
+        catch (const std::domain_error&) {
+            // the queue is empty
+            break;
+        }
+        while(true) {
+            std::tuple<int, int, std::string> data(queue.GetData());
+
+            // print out the entries in the queue
+            std::cout << std::get<0>(data) << " " << std::get<1>(data) << " " << std::get<2>(data) << " | ";
+
+            try {
+                queue.MoveForward();
+            }
+            // we have reached the end of the queue
+            catch (const std::domain_error&) {
+                break;
+            }
+
+        }
+        std::cout << "\n";
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+}
+
+void QueueEraser(ReversibleQueue<std::tuple<int, int, std::string>> &queue, int queueLength) {
+    // continually selects a random element in the queue to remove then waits 0.2 seconds
+    // returns when the queue is empty
+    std::random_device rd;
+    std::default_random_engine e{rd()};
+    while (true) {
+        try {
+            queue.GoToBack();
+        }
+        catch (const std::domain_error&) {
+            // the queue is empty
+            break;
+        }
+        std::uniform_int_distribution<int> distDelete{0, queueLength-1};
+        int toDelete(distDelete(e));
+        for(int i = 0; i < queueLength; i++) {
+            if (i==toDelete) {
+                try {
+                    queue.Erase();
+                    break;
+                }
+                catch (const std::domain_error&) {
+                    queue.ClearObserver();
+                    queue.PopBack();
+                    break;
+                }
+
+            }
+            try {
+                queue.MoveForward();
+            }
+                // we have reached the end of the queue
+            catch (const std::domain_error&) {
+                break;
+            }
+
+        }
+        queueLength -= 1 ;
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+
+}
+
 int main() {
-    ReversibleQueue<std::tuple<int,std::string>> testQueue;
-    testQueue.PushFront(std::tuple<int,std::string>(1,"tt"));
-    testQueue.PushFront(std::tuple<int,std::string>(2,"tt"));
-    testQueue.PushFront(std::tuple<int,std::string>(3,"tt"));
-    testQueue.PushFront(std::tuple<int,std::string>(4,"tt"));
-    testQueue.PushFront(std::tuple<int,std::string>(5,"tt"));
-    testQueue.PopBack();
-    testQueue.PopBack();
-    testQueue.PopBack();
-    testQueue.insert(std::tuple<int,std::string>(3,"2"));
-    int i =3;
+
+    ReversibleQueue<std::tuple<int, int, std::string>> queue;
+
+    const int queueLength(80);
+
+    std::random_device rd;
+    std::default_random_engine e{rd()};
+    std::uniform_int_distribution<int> distChar{0, 25};
+    std::uniform_int_distribution<int> distLen{3, 7};
+    std::uniform_int_distribution<int> distNum{0, 255};
+
+    // populate queue from rear end
+    for (int i = 0; i < queueLength; i++) {
+        std::string word;
+
+        int num = distNum(e);
+
+        for (int j = 0; j < distLen(e); j++) {
+            word += static_cast<char>('a' + distChar(e));
+        }
+        queue.PushBack(std::tuple<int, int, std::string> (i, num, word));
+    }
+
+
+    std::thread t1(QueueReverser, std::ref(queue));
+//    std::thread t2(QueuePrinter, std::ref(queue));
+    std::thread t3(QueueEraser, std::ref(queue), queueLength);
+    t1.join();
+//    t2.join();
+    t3.join();
+
 }
