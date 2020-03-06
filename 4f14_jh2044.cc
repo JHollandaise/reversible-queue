@@ -180,7 +180,6 @@ public:
                     // if we fail to lock the forward lock, unlock everything and try again
                     // TODO: almost certainly some livelocking going on here, not too serious
                     eraseLock.unlock();
-                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
                     eraseLock.lock();
                     continue;
                 }
@@ -259,7 +258,6 @@ public:
                     // if we fail to lock the forward lock, unlock everything and try again
                     nodeToKill->m.unlock();
                     // give the blocking thread a chance to complete acquire of this/release that node
-                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
                     nodeToKill->m.lock();
                     continue;
                 }
@@ -322,7 +320,6 @@ public:
                 // unlock everything and try again
                 currentNode->m.unlock();
                 // give the blocking thread a chance to complete acquire of this/release that node
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 currentNode->m.lock();
                 continue;
             }
@@ -369,7 +366,6 @@ public:
                         // unlock everything and try again
                         currentNode->m.unlock();
                         // give the blocking thread a chance to complete acquire of this/release that node
-                        std::this_thread::sleep_for(std::chrono::milliseconds(20));
                         currentNode->m.lock();
                         continue;
                     }
@@ -394,9 +390,18 @@ public:
 
     // returns the data contained in the currently observed node
     T GetData() const {
+        // acquire high-level lock
         std::shared_ptr<Node<T>> node (threadLocator[std::this_thread::get_id()]);
         if (!node) throw std::logic_error("thread not currently observing the queue");
         return node->data;
+    }
+
+    // initialises a queue observer for the given thread
+    void InitObserver() {
+        // acquire queue lock
+        std::lock_guard<std::mutex> queueLock(m);
+        threadLocator[std::this_thread::get_id()] = nullptr;
+
     }
 
 private:
@@ -415,10 +420,11 @@ private:
     bool direction;
 };
 
-void QueueReverser(ReversibleQueue<std::tuple<int, int, std::string>> &queue) {
+void QueueReverser(ReversibleQueue<std::tuple<int, std::string>> &queue) {
     // reverses the direction of the queue, then prints out the sum of the numerical entries
     // returns when the queue is empty
 
+    queue.InitObserver();
     while (true) {
         // reverse queue direction
         queue.reverse();
@@ -433,9 +439,9 @@ void QueueReverser(ReversibleQueue<std::tuple<int, int, std::string>> &queue) {
         // sum the number in entries and print
         long sum(0);
         while(true) {
-            std::tuple<int, int, std::string> data(queue.GetData());
+            std::tuple<int, std::string> data(queue.GetData());
 
-            sum += std::get<1>(data);
+            sum += std::get<0>(data);
 
             try {
                 queue.MoveForward();
@@ -448,14 +454,17 @@ void QueueReverser(ReversibleQueue<std::tuple<int, int, std::string>> &queue) {
         }
         std::cout << "\n" << sum << "\n";
 
-//        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        // small delay to preven stdout spam
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
 }
 
-void QueuePrinter(ReversibleQueue<std::tuple<int, int, std::string>> &queue) {
+void QueuePrinter(ReversibleQueue<std::tuple<int, std::string>> &queue) {
     // continually prints the sequence of nodes currently in the queue, from back to front
     // returns when the queue is empty
+
+    queue.InitObserver();
 
     while (true) {
         try {
@@ -466,10 +475,10 @@ void QueuePrinter(ReversibleQueue<std::tuple<int, int, std::string>> &queue) {
             break;
         }
         while(true) {
-            std::tuple<int, int, std::string> data(queue.GetData());
+            std::tuple<int, std::string> data(queue.GetData());
 
             // print out the entries in the queue
-            std::cout << std::get<0>(data) << " " << std::get<1>(data) << " " << std::get<2>(data) << " | ";
+            std::cout << std::get<0>(data) << " " << std::get<1>(data) << " | ";
 
             try {
                 queue.MoveForward();
@@ -481,13 +490,17 @@ void QueuePrinter(ReversibleQueue<std::tuple<int, int, std::string>> &queue) {
 
         }
         std::cout << "\n";
+        // small delay to prevent stdout spam
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 }
 
-void QueueEraser(ReversibleQueue<std::tuple<int, int, std::string>> &queue, int queueLength) {
+void QueueEraser(ReversibleQueue<std::tuple<int, std::string>> &queue, int queueLength) {
     // continually selects a random element in the queue to remove then waits 0.2 seconds
     // returns when the queue is empty
+
+    queue.InitObserver();
+
     std::random_device rd;
     std::default_random_engine e{rd()};
     while (true) {
@@ -530,7 +543,7 @@ void QueueEraser(ReversibleQueue<std::tuple<int, int, std::string>> &queue, int 
 
 int main() {
 
-    ReversibleQueue<std::tuple<int, int, std::string>> queue;
+    ReversibleQueue<std::tuple<int, std::string>> queue;
 
     const int queueLength(80);
 
@@ -549,15 +562,16 @@ int main() {
         for (int j = 0; j < distLen(e); j++) {
             word += static_cast<char>('a' + distChar(e));
         }
-        queue.PushBack(std::tuple<int, int, std::string> (i, num, word));
+        queue.PushBack(std::tuple<int, std::string> (num, word));
     }
 
 
     std::thread t1(QueueReverser, std::ref(queue));
-//    std::thread t2(QueuePrinter, std::ref(queue));
+    std::thread t2(QueuePrinter, std::ref(queue));
     std::thread t3(QueueEraser, std::ref(queue), queueLength);
     t1.join();
-//    t2.join();
+    t2.join();
     t3.join();
+
 
 }
