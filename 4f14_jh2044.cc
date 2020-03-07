@@ -18,17 +18,17 @@ public:
     std::mutex m;
 
     void SetInfront(std::shared_ptr<Node> f) {
-        direction ? (right = f) : (left = f);
+        direction ? (left = f) : (right = f);
     }
     void SetBehind(std::shared_ptr<Node> b) {
-        direction ? (left = b) : (right = b);
+        direction ? (right = b) : (left = b);
     }
 
     std::shared_ptr<Node> GetInfront() const {
-        return direction ? right : left;
+        return direction ? left : right;
     }
     std::shared_ptr<Node> GetBehind() const {
-        return direction ? left : right;
+        return direction ? right : left;
     }
 
     void SetDirection(bool newDirection) { direction = newDirection; }
@@ -53,7 +53,7 @@ public:
     // TODO: could mutex individual data (front, back); significant benefit? probably not worth it
     mutable std::mutex m;
 
-    // adds a data item to the front of the queue
+    // adds a data item to the front of the queue [ O(1) ]
     void PushFront(const T item) {
         // acquire high-level list mutex
         std::lock_guard<std::mutex> listLock(m);
@@ -88,16 +88,16 @@ public:
         newNode->SetInfront(newNode);
     }
 
-    // adds a data item behind the last item
+    // adds a data item behind the last item [ O(1) ]
     void PushBack(const T item) {
         // TODO: is item valid?
-
-        // generate a newNode
-        const std::shared_ptr<Node<T>>newNode = std::make_shared<Node<T>>(item,direction);
 
         // acquire high level list mutex
         // (write to front/back)
         std::lock_guard<std::mutex> listLock(m);
+
+        // generate a newNode
+        const std::shared_ptr<Node<T>>newNode = std::make_shared<Node<T>>(item,direction);
         // acquire low level node mutex
         std::lock_guard<std::mutex> newNodeLock(newNode->m);
 
@@ -121,16 +121,16 @@ public:
         newNode->SetBehind(newNode);
     }
 
-    // removes the first data item
+    // removes the first data item [ O(1) ]
     void PopFront() {
         // acquire high level list mutex
         // (write to *f / b* => invalid)
         std::lock_guard<std::mutex> queueLock(m);
 
         // empty list
-        if(!front) throw std::logic_error("PopFront: cannot pop from empty list");
+        if(!front) throw std::domain_error("PopFront: cannot pop from empty list");
         // acquire death-row node FIRST
-        std::lock_guard<std::mutex> eraseLock(front->m);
+        std::lock_guard<std::mutex> frontLock(front->m);
         // single item in list? => safe to burn the references
         if (front == back) {
             front->SetBehind(nullptr);
@@ -151,17 +151,17 @@ public:
         }
     }
 
-    // removes the last data item
+    // removes the last data item [ O(n) ]
     void PopBack() {
         // acquire high level list mutex
         // (write to *f / b* => invalid)
         std::lock_guard<std::mutex> listLock(m);
 
         // empty list
-        if(!back) throw std::logic_error("PopBack: cannot pop from empty list");
+        if(!back) throw std::domain_error("PopBack: cannot pop from empty list");
 
-        // This function requires a locking attempt loop due to it requiring a lock and its forward neighbour
-        // we are making the locking attempt on forward neighbours weak in order to remove deadlock states
+        // due to the requirement to propagate locks BACKWARDS ONLY, this must move through the list from front to
+        // back in order to ensure a valid lock sequence
         std::unique_lock<std::mutex>eraseLock(back->m);
         while(true) {
             // single item in list? => safe to burn the references
@@ -196,7 +196,7 @@ public:
         }
     }
 
-    // adds a data node behind the given current thread observer location
+    // adds a data node BEHIND the given current thread observer location
     // will throw an error if the observer is looking at the rear node
     void Insert(const T item) {
 
@@ -231,7 +231,7 @@ public:
 
     }
 
-    // erases a data node at the thread locator position and then remove the thread locator
+    // erases a data node BEHIND the thread locator position
     void Erase() {
 
         std::shared_ptr<Node<T>> nodeToKill(threadLocator[std::this_thread::get_id()]);
@@ -284,8 +284,8 @@ public:
 
     }
 
-    // set the thread to observe the rear of the queue
-    void GoToBack() const {
+    // set the thread to observe the front of the queue
+    void GoToFront() const {
         std::shared_ptr<Node<T>> currentNode (threadLocator[std::this_thread::get_id()]);
         if(currentNode) {
             currentNode->m.unlock();
