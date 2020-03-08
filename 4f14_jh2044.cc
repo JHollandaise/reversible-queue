@@ -195,7 +195,7 @@ public:
     }
 
     // adds a data node BEHIND the given current thread observer location
-    // will throw an error if the observer is looking at the rear node
+    // will throw an error if the observer is looking at the rear node [ O(1) ]
     void Insert(const T item) {
 
         // NOTE: this operation never requires the ownership of the high-level mutex so multiple can occur simultaneously
@@ -229,7 +229,7 @@ public:
 
     }
 
-    // erases a data node BEHIND the thread locator position
+    // erases a data node BEHIND the thread locator position [ O(1) ]
     void Erase() {
 
         std::shared_ptr<Node<T>> locatorNode(threadLocator[std::this_thread::get_id()]);
@@ -255,7 +255,7 @@ public:
 
     }
 
-    // set the thread to observe the front of the queue will set the thread locator to nullptr if list is empty
+    // set the thread to observe the front of the queue will set the thread locator to nullptr if list is empty [ O(1) ]
     void GoToFront() const {
         std::shared_ptr<Node<T>> currentNode (threadLocator[std::this_thread::get_id()]);
         if(currentNode) {
@@ -269,7 +269,7 @@ public:
         front->m.lock();
     }
 
-    // moves the observed node to the one in front of current, throws an exception if at the back already
+    // moves the observed node to the one in front of current, throws an exception if at the back already [ O(1) ]
     void MoveBackward() const {
         std::shared_ptr<Node<T>> currentNode (threadLocator[std::this_thread::get_id()]);
 
@@ -291,7 +291,7 @@ public:
         threadLocator[std::this_thread::get_id()] = behindNode;
     }
 
-    // unlocks and stops observing a node
+    // unlocks and stops observing a node [ O(1) ]
     void ClearObserver() const {
         std::shared_ptr<Node<T>> currentNode (threadLocator[std::this_thread::get_id()]);
         if(currentNode) {
@@ -300,7 +300,7 @@ public:
         }
     }
 
-    // changes the access and traverse direction of the queue
+    // changes the access and traverse direction of the queue [ O(n) ]
     void Reverse() {
         // acquire high-level control
         std::lock_guard<std::mutex> queueLock(m);
@@ -333,7 +333,7 @@ public:
 
     }
 
-    // returns the data contained in the currently observed node
+    // returns the data contained in the currently observed node [ O(1) ]
     T GetData() const {
         // acquire high-level locks
         std::shared_ptr<Node<T>> node (threadLocator[std::this_thread::get_id()]);
@@ -341,7 +341,7 @@ public:
         return node->data;
     }
 
-    // initialises a queue observer for the given thread
+    // initialises a queue observer for the given thread [ O(1) ]
     void InitObserver() {
         // acquire queue lock
         std::lock_guard<std::mutex> queueLock(m);
